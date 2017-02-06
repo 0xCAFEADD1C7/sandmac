@@ -70,7 +70,7 @@ void array_get_h(uint32_t i, State* s) {
     Array* array = Vec_get_mut(&s->arrays, s->registers[rb]);
     uint32_t index = s->registers[rc];
     if (index >= array->size) {
-        fprintf(stderr, "index out of bounds\n");
+        fprintf(stderr, "index %d out of bounds (array #%d is %d plates big)\n", index, s->registers[rb], array->size);
         exit(EXIT_FAILURE);
     }
     s->registers[ra] = array->mem[index];
@@ -209,11 +209,68 @@ void State_drop(State* s) {
     Vec_drop(&s->available_arrays);
 }
 
+uint32_t endianness_switch(uint32_t value)
+{
+    uint32_t result = 0;
+    result |= (value & 0x000000FF) << 24;
+    result |= (value & 0x0000FF00) << 8;
+    result |= (value & 0x00FF0000) >> 8;
+    result |= (value & 0xFF000000) >> 24;
+    return result;
+}
+
+const char* string_of_opcode(int opCode) {
+    static const char* ops[] = {
+        "cond_move_h",
+        "array_get_h",
+        "array_set_h",
+        "add_h",
+        "mul_h",
+        "div_h",
+        "nand_h",
+        "stop_h",
+        "alloc_h",
+        "free_h",
+        "output_h",
+        "input_h",
+        "load_code_h",
+        "load_h",
+        "BAD_OPCODE"
+    };
+    return ops[opCode];
+}
+
 int main(int argc, char** argv) {
     State s;
     State_init(&s);
 
-    // TODO
+    if (argc != 2) {
+        fprintf(stderr, "Usage : %s file\n", argv[0]);
+        return 1;
+    }
+
+    FILE* fhandler = fopen(argv[1], "rb");
+    if (fhandler == NULL) {
+        perror(argv[1]);
+        return 1;
+    }
+
+    uint32_t instr;
+    int nbRead = 0;
+    while ((nbRead = fread(&instr, sizeof(uint32_t), 1, fhandler)) > 0) {
+        int opCode = extract_operator(endianness_switch(instr));
+
+        if (opCode >= OP_COUNT) {
+            fprintf(stderr, "Bad instruction !!\n");
+            return 1;
+        }
+
+        printf("evaluating %s\n", string_of_opcode(opCode));
+
+        ihandlers[opCode](instr, &s);
+    }    
+
+    fclose(fhandler);
 
     State_drop(&s);
     return EXIT_SUCCESS;
