@@ -1,6 +1,8 @@
 #include "core.h"
 #include "vec.h"
 
+#include <stdarg.h>
+
 #define REGISTER_COUNT 8
 
 typedef enum {
@@ -33,13 +35,27 @@ typedef struct {
     Vec available_arrays;
 } State;
 
+void debug (const char * format, ...)
+{
+  if (0)
+  {
+    va_list arg_ptr;
+
+    va_start (arg_ptr, format);
+    vfprintf (stdout, format, arg_ptr);
+    va_end (arg_ptr);
+    fflush (stdout);
+  }
+}
+
+
 Operator extract_operator(uint32_t instruction) {
     return instruction >> 28;
 }
 
 const uint32_t THREE_BITS = 7;
 
-uint8_t register_a(uint32_t i) {
+uint8_t register_c(uint32_t i) {
     return i & THREE_BITS;
 }
 
@@ -47,7 +63,7 @@ uint8_t register_b(uint32_t i) {
     return (i >> 3) & THREE_BITS;
 }
 
-uint8_t register_c(uint32_t i) {
+uint8_t register_a(uint32_t i) {
     return (i >> 6) & THREE_BITS;
 }
 
@@ -60,6 +76,7 @@ typedef void (*IHandler)(uint32_t, State*);
 
 void cond_move_h(uint32_t i, State* s) {
     registers_on_stack(i);
+    debug("r%d == 0 || r%d <- r%d\n", rc, ra, rb);
     if (s->registers[rc] != 0) {
         s->registers[ra] = s->registers[rb];
     }
@@ -67,6 +84,7 @@ void cond_move_h(uint32_t i, State* s) {
 
 void array_get_h(uint32_t i, State* s) {
     registers_on_stack(i);
+    debug("r%d <- get array %d[%d]\n", ra, s->registers[rb], s->registers[rc]);
     Array* array = Vec_get_mut(&s->arrays, s->registers[rb]);
     uint32_t index = s->registers[rc];
     if (index >= array->size) {
@@ -78,6 +96,7 @@ void array_get_h(uint32_t i, State* s) {
 
 void array_set_h(uint32_t i, State* s) {
     registers_on_stack(i);
+    debug("set array %d[%d]  <- r%d\n", s->registers[ra], s->registers[rb], rc);
     Array* array = Vec_get_mut(&s->arrays, s->registers[ra]);
     uint32_t index = s->registers[rb];
     array->mem[index] = s->registers[rc];
@@ -86,6 +105,7 @@ void array_set_h(uint32_t i, State* s) {
 #define operator_h(name, pre, mid)                                      \
     void name##_h(uint32_t i, State* s) {                               \
         registers_on_stack(i);                                          \
+        debug("r%d  <- "#pre"(%x "#mid" %x)\n", ra, s->registers[rb], s->registers[rc]); \
         s->registers[ra] = pre (s->registers[rb] mid s->registers[rc]); \
     }
 
@@ -95,6 +115,7 @@ operator_h(div, , /)
 operator_h(nand, ~, &)
 
 void stop_h(uint32_t i, State* s) {
+    debug("stop instruction!\n");
     (void)(i);
     (void)(s);
     exit(EXIT_SUCCESS);
@@ -102,6 +123,7 @@ void stop_h(uint32_t i, State* s) {
 
 void alloc_h(uint32_t i, State* s) {
     uint32_t size = s->registers[register_c(i)];
+    debug("allocating Array of size %u (from r%d)\n", size, register_c(i));
     uint32_t* mem = calloc(size, sizeof(uint32_t));
     assert_alloc(mem);
     Array array = (Array) {
@@ -123,6 +145,7 @@ void alloc_h(uint32_t i, State* s) {
 
 void free_h(uint32_t i, State* s) {
     uint32_t index = s->registers[register_c(i)];
+    debug("freeing Array%d (from r%d)\n", index, register_c(i));
     Array* array = Vec_get_mut(&s->arrays, index);
     free(array->mem);
     *array = (Array) {
@@ -133,6 +156,7 @@ void free_h(uint32_t i, State* s) {
 }
 
 void output_h(uint32_t i, State* s) {
+    debug("Printing from r%d\n", register_c(i));
     fprintf(stdout, "%c", s->registers[register_c(i)]);
 }
 
@@ -148,6 +172,13 @@ void input_h(uint32_t i, State* s) {
 
 void load_code_h(uint32_t i, State* s) {
     uint32_t index = s->registers[register_b(i)];
+    debug("Array0 = Array%d (PC = %u)\n", index, s->registers[register_c(i)]);
+    
+    if (index == 0) { /* special case : load_code acts as a jmp, no need to copy the array */ 
+        s->instruction_pointer = s->registers[register_c(i)];
+        return; 
+    }
+
     Array* array = Vec_get_mut(&s->arrays, index);
     Array* program = Vec_get_mut(&s->arrays, 0);
     assert(array->size > 0);
@@ -162,12 +193,14 @@ void load_code_h(uint32_t i, State* s) {
         .mem = mem,
         .size = array->size
     };
+
+    s->instruction_pointer = s->registers[register_c(i)];
 }
 
 void load_h(uint32_t i, State* s) {
     uint8_t r = (i >> 25) & THREE_BITS;
-    uint32_t seven_bits = (THREE_BITS << 6) | (THREE_BITS << 3) | 1;
-    uint32_t value = i & ~(seven_bits << 25);
+    uint32_t value = i & 0x1FFFFFF;
+    debug("r%d <- %x\n", r, value);
     s->registers[r] = value;
 }
 
@@ -209,8 +242,7 @@ void State_drop(State* s) {
     Vec_drop(&s->available_arrays);
 }
 
-uint32_t endianness_switch(uint32_t value)
-{
+uint32_t endianness_switch(uint32_t value) {
     uint32_t result = 0;
     result |= (value & 0x000000FF) << 24;
     result |= (value & 0x0000FF00) << 8;
@@ -219,7 +251,7 @@ uint32_t endianness_switch(uint32_t value)
     return result;
 }
 
-const char* string_of_opcode(int opCode) {
+const char* string_of_opcode(uint8_t opCode) {
     static const char* ops[] = {
         "cond_move_h",
         "array_get_h",
@@ -235,9 +267,23 @@ const char* string_of_opcode(int opCode) {
         "input_h",
         "load_code_h",
         "load_h",
-        "BAD_OPCODE"
     };
-    return ops[opCode];
+    if (opCode >= OP_COUNT) {
+        return "BAD_OPERATOR";
+    } else {
+        return ops[opCode];
+    }
+}
+
+void dump_registers(State* s) {
+    int i;
+    for (i = 0; i < 8; i++) {
+        debug("r%d \t", i);
+    }
+    debug("\n");
+    for (i = 0; i < 8; i++) {
+        debug("%x\t", s->registers[i]);
+    }
 }
 
 int main(int argc, char** argv) {
@@ -246,31 +292,52 @@ int main(int argc, char** argv) {
 
     if (argc != 2) {
         fprintf(stderr, "Usage : %s file\n", argv[0]);
-        return 1;
+        return EXIT_FAILURE;
     }
 
     FILE* fhandler = fopen(argv[1], "rb");
     if (fhandler == NULL) {
         perror(argv[1]);
-        return 1;
+        return EXIT_FAILURE;
     }
 
+    fseek(fhandler, 0, SEEK_END);
+    size_t fsize = ftell(fhandler);
+    fseek(fhandler, 0, SEEK_SET);
+
+    uint32_t* mem = calloc(fsize, sizeof(uint32_t));
+    assert_alloc(mem);
+    Array array = (Array) {
+        .mem = mem,
+        .size = fsize
+    };
+    Vec_push(&s.arrays, &array);
+
     uint32_t instr;
-    int nbRead = 0;
-    while ((nbRead = fread(&instr, sizeof(uint32_t), 1, fhandler)) > 0) {
-        int opCode = extract_operator(endianness_switch(instr));
-
-        if (opCode >= OP_COUNT) {
-            fprintf(stderr, "Bad instruction !!\n");
-            return 1;
-        }
-
-        printf("evaluating %s\n", string_of_opcode(opCode));
-
-        ihandlers[opCode](instr, &s);
-    }    
+    for (size_t i = 0; fread(&instr, sizeof(uint32_t), 1, fhandler) == 1; i++) {
+        mem[i] = endianness_switch(instr);
+    }
 
     fclose(fhandler);
+
+    while (true) {
+        const Array* program = Vec_get(&s.arrays, 0);
+        if (s.instruction_pointer >= program->size) {
+            break;
+        }
+
+        uint32_t instr = program->mem[s.instruction_pointer++];
+        uint8_t opcode = extract_operator(instr);
+
+        if (opcode >= OP_COUNT) {
+            fprintf(stderr, "Instruction %x invalid !\n", instr);
+            break;
+        }
+
+        ihandlers[opcode](instr, &s);
+        dump_registers(&s);
+        debug("\n");
+    }
 
     State_drop(&s);
     return EXIT_SUCCESS;
